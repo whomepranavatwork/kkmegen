@@ -64,35 +64,81 @@ app.get("/health", (_req, res) => res.json({ ok: true, gemini: !!GEMINI_KEY }));
 
 // ── Generate meme ─────────────────────────────────────────────────────────────
 app.post("/api/generate", async (_req, res) => {
-  if (!GEMINI_KEY) return res.status(500).json({ error: "GEMINI_API_KEY not configured on server. Add it in Railway Variables." });
+  const logs = [];
+  const log = (msg) => { logs.push("[" + new Date().toISOString() + "] " + msg); console.log(msg); };
+
+  if (!GEMINI_KEY) return res.status(500).json({ error: "GEMINI_API_KEY not configured on server.", logs });
 
   // Pick random meme type
   const meme = MEME_TYPES[Math.floor(Math.random() * MEME_TYPES.length)];
+  log("Selected meme type: " + meme.name);
+  log("Prompt length: " + meme.prompt.length + " chars");
 
   try {
     // Step 1: Gemini generates the template
+    log("Calling Gemini API...");
+    log("URL: " + GEMINI_URL);
+    log("Key prefix: " + GEMINI_KEY.slice(0, 10) + "...");
+
+    const reqBody = {
+      contents: [{ parts: [{ text: meme.prompt }] }],
+      generationConfig: { responseModalities: ["IMAGE", "TEXT"] }
+    };
+    log("Request body keys: " + JSON.stringify(Object.keys(reqBody)));
+
     const r = await fetch(GEMINI_URL, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         "x-goog-api-key": GEMINI_KEY
       },
-      body: JSON.stringify({
-        contents: [{ parts: [{ text: meme.prompt }] }],
-        generationConfig: { responseModalities: ["IMAGE", "TEXT"] }
-      })
+      body: JSON.stringify(reqBody)
     });
 
-    const b = await r.json().catch(() => ({}));
+    log("Gemini HTTP status: " + r.status);
+    log("Gemini response headers content-type: " + (r.headers.get("content-type") || "none"));
+
+    const rawText = await r.text();
+    log("Gemini raw response length: " + rawText.length + " chars");
+    log("Gemini raw response preview: " + rawText.slice(0, 500));
+
+    let b;
+    try { b = JSON.parse(rawText); } catch (e) {
+      log("ERROR: Failed to parse Gemini response as JSON: " + e.message);
+      return res.status(500).json({ error: "Gemini returned non-JSON response", logs });
+    }
+
     if (!r.ok) {
-      return res.status(r.status).json({ error: "Gemini error " + r.status + ": " + (b?.error?.message || "") });
+      const msg = b?.error?.message || "Unknown error";
+      log("ERROR: Gemini API error: " + msg);
+      return res.status(r.status).json({ error: "Gemini error " + r.status + ": " + msg, logs });
+    }
+
+    // Log response structure
+    log("Gemini response candidates count: " + (b?.candidates?.length || 0));
+    if (b?.candidates?.[0]) {
+      const c = b.candidates[0];
+      log("Candidate finish reason: " + (c.finishReason || "none"));
+      const parts = c?.content?.parts || [];
+      log("Parts count: " + parts.length);
+      parts.forEach((p, i) => {
+        if (p.text) log("Part " + i + ": TEXT (" + p.text.length + " chars): " + p.text.slice(0, 100));
+        if (p.inlineData) log("Part " + i + ": IMAGE (" + p.inlineData.mimeType + ", " + p.inlineData.data.length + " b64 chars)");
+        if (!p.text && !p.inlineData) log("Part " + i + ": UNKNOWN keys: " + JSON.stringify(Object.keys(p)));
+      });
+    } else {
+      log("No candidates returned");
+      if (b?.promptFeedback) log("Prompt feedback: " + JSON.stringify(b.promptFeedback));
     }
 
     const parts = b?.candidates?.[0]?.content?.parts || [];
     const imgPart = parts.find(p => p.inlineData);
     if (!imgPart) {
-      return res.status(422).json({ error: "Gemini returned no image — try again." });
+      log("ERROR: No image part found in response");
+      return res.status(422).json({ error: "Gemini returned no image — try again.", logs });
     }
+
+    log("Got image! Proceeding to composite...");
 
     // Step 2: Composite Kunal's face onto the template
     const templateBuf = Buffer.from(imgPart.inlineData.data, "base64");
@@ -100,6 +146,7 @@ app.post("/api/generate", async (_req, res) => {
     const meta = await sharp(templateBuf).metadata();
     const w = meta.width || 1024;
     const h = meta.height || 1024;
+    log("Template image size: " + w + "x" + h);
 
     let composites = [];
     const faceSize = Math.round(Math.min(w, h) * 0.22);
@@ -155,14 +202,18 @@ app.post("/api/generate", async (_req, res) => {
       .toBuffer();
 
     const resultB64 = result.toString("base64");
+    log("Composite done! Final image: " + resultB64.length + " b64 chars");
 
     return res.json({
       mimeType: "image/jpeg",
       data: resultB64,
-      type: meme.name
+      type: meme.name,
+      logs
     });
   } catch (e) {
-    return res.status(500).json({ error: e.message });
+    log("EXCEPTION: " + e.message);
+    log("Stack: " + (e.stack || "").slice(0, 300));
+    return res.status(500).json({ error: e.message, logs });
   }
 });
 
@@ -235,6 +286,11 @@ button{font-family:inherit;cursor:pointer;border:none;border-radius:10px;font-si
     <img id="memeImg" alt="Kunal Khemu meme"/>
   </div>
 
+  <details id="logsDetails" style="display:none;margin-bottom:16px">
+    <summary style="font-size:12px;color:var(--muted);cursor:pointer">View debug logs</summary>
+    <pre id="logsBox" style="font-size:11px;padding:14px;border-radius:10px;margin-top:8px;background:var(--card);border:1px solid var(--border);color:var(--muted);line-height:1.6;white-space:pre-wrap;word-break:break-word;max-height:400px;overflow:auto;font-family:monospace"></pre>
+  </details>
+
   <div class="footer">Powered by Gemini + Sharp &middot; Every meme is unique &middot; Kunal Khemu is inevitable</div>
 </div>
 
@@ -248,6 +304,8 @@ async function generate() {
   document.getElementById("imgWrap").style.display = "none";
   document.getElementById("dlBtn").style.display = "none";
   document.getElementById("typeTag").style.display = "none";
+  document.getElementById("logsDetails").style.display = "none";
+  document.getElementById("logsBox").textContent = "";
   currentImage = null;
 
   try {
@@ -258,6 +316,13 @@ async function generate() {
       body: JSON.stringify({})
     });
     var data = await res.json();
+
+    // Always show logs if present
+    if (data.logs && data.logs.length) {
+      document.getElementById("logsBox").textContent = data.logs.join("\\n");
+      document.getElementById("logsDetails").style.display = "block";
+    }
+
     if (!res.ok) throw new Error(data.error || "Generation failed");
 
     currentImage = "data:" + (data.mimeType || "image/png") + ";base64," + data.data;
@@ -274,6 +339,7 @@ async function generate() {
   } catch (e) {
     showError(e.message);
     setStatus("");
+    // logs should already be shown from the response above
   }
 
   btn.disabled = false; btn.textContent = "Generate Meme";
