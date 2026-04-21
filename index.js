@@ -5,7 +5,7 @@ const sharp   = require("sharp");
 const app     = express();
 app.use(express.json({ limit: "10mb" }));
 
-const GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent";
+const GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-image:generateContent";
 const PORT       = process.env.PORT || 3003;
 const GEMINI_KEY = process.env.GEMINI_API_KEY || "";
 
