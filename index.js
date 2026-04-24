@@ -31,6 +31,10 @@ function buildPrompt() {
     "- Must include one clearly visible empty white/gray rectangle or circle (with thin border) where a face photo will be added later. Place it where a profile pic or portrait would naturally go.\n\n" +
     "BAD EXAMPLE (don't do this): A cosmic infographic with glowing charts about 'Cosmic Significance Index'. This is overdesigned and tries too hard.\n" +
     "GOOD EXAMPLE (do this): A plain Google search result page where you searched 'who created the universe' and every result says Kunal Khemu. Simple, flat, recognizable, deadpan.\n\n" +
+    "IMPORTANT — In your text response, you MUST include the placeholder coordinates in this exact format on its own line:\n" +
+    "PLACEHOLDER:x,y,width,height\n" +
+    "Where x,y is the top-left corner of the placeholder in pixels, and width,height is its size in pixels. These must be the exact coordinates of the empty placeholder area you drew in the image. Example: PLACEHOLDER:350,200,150,150\n" +
+    "If you drew multiple placeholders, give one line per placeholder.\n\n" +
     "Now generate ONE meme image. Pick something nobody has done before. Keep it stupid simple.";
 }
 
@@ -96,9 +100,28 @@ app.post("/api/generate", async function(_req, res) {
       return res.status(422).json({ error: "No image generated — try again.", logs: logs });
     }
 
-    log("Got image! Compositing face...");
+    log("Got image! Parsing placeholder coordinates...");
 
-    // Composite Kunal's face onto the placeholder
+    // Parse placeholder coordinates from Gemini's text response
+    var placeholders = [];
+    if (textPart && textPart.text) {
+      var lines = textPart.text.split("\n");
+      for (var i = 0; i < lines.length; i++) {
+        var match = lines[i].match(/PLACEHOLDER\s*:\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/i);
+        if (match) {
+          placeholders.push({
+            x: parseInt(match[1]),
+            y: parseInt(match[2]),
+            w: parseInt(match[3]),
+            h: parseInt(match[4])
+          });
+        }
+      }
+      log("Gemini text: " + textPart.text.slice(0, 300));
+    }
+    log("Parsed " + placeholders.length + " placeholder(s)");
+
+    // Composite Kunal's face onto the placeholder(s)
     var templateBuf = Buffer.from(imgPart.inlineData.data, "base64");
     var kunalBuf = Buffer.from(KUNAL_B64, "base64");
     var meta = await sharp(templateBuf).metadata();
@@ -106,16 +129,34 @@ app.post("/api/generate", async function(_req, res) {
     var h = meta.height || 1024;
     log("Template: " + w + "x" + h);
 
-    var faceSize = Math.round(Math.min(w, h) * 0.25);
-    var face = await sharp(kunalBuf).resize(faceSize, faceSize).toBuffer();
+    var composites = [];
 
-    // Place face in center (where placeholder most likely is)
-    var result = await sharp(templateBuf)
-      .composite([{
+    if (placeholders.length > 0) {
+      // Use Gemini's coordinates
+      for (var j = 0; j < placeholders.length; j++) {
+        var p = placeholders[j];
+        // Clamp to image bounds
+        var px = Math.max(0, Math.min(p.x, w - 10));
+        var py = Math.max(0, Math.min(p.y, h - 10));
+        var pw = Math.max(20, Math.min(p.w, w - px));
+        var ph = Math.max(20, Math.min(p.h, h - py));
+        log("Placing face at: x=" + px + " y=" + py + " w=" + pw + " h=" + ph);
+        var face = await sharp(kunalBuf).resize(pw, ph, { fit: "cover" }).toBuffer();
+        composites.push({ input: face, top: py, left: px });
+      }
+    } else {
+      // Fallback: center of image
+      log("No coordinates found — falling back to center");
+      var faceSize = Math.round(Math.min(w, h) * 0.25);
+      var face = await sharp(kunalBuf).resize(faceSize, faceSize).toBuffer();
+      composites.push({
         input: face,
         top: Math.round((h - faceSize) / 2),
         left: Math.round((w - faceSize) / 2)
-      }])
+      });
+    }
+    var result = await sharp(templateBuf)
+      .composite(composites)
       .jpeg({ quality: 90 })
       .toBuffer();
 
